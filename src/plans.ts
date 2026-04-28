@@ -42,7 +42,7 @@ const QUEUE_DEFAULTS = {
   partition: false
 }
 
-const COMMON_JOB_TABLE = 'job_common'
+const COMMON_JOB_TABLE = 'job'
 
 function create (schema: string, version: number, options?: { createSchema?: boolean }) {
   const commands = [
@@ -56,19 +56,24 @@ function create (schema: string, version: number, options?: { createSchema?: boo
     createTableBam(schema),
 
     jobTableFormatFunction(schema),
-    jobTableRunFunction(schema),
     jobTableRunAsyncFunction(schema),
 
     createTableJob(schema),
-    createPrimaryKeyJob(schema),
 
-    createTableJobCommon(schema),
+    createQueueForeignKeyJob(schema),
+    createQueueForeignKeyJobDeadLetter(schema),
+    createIndexJobPolicyShort(schema),
+    createIndexJobPolicySingleton(schema),
+    createIndexJobPolicyStately(schema),
+    createIndexJobPolicyExclusive(schema),
+    createIndexJobPolicyKeyStrictFifo(schema),
+    createCheckConstraintKeyStrictFifo(schema),
+    createIndexJobThrottle(schema),
+    createIndexJobFetch(schema),
+    createIndexJobGroupConcurrency(schema),
 
     createTableWarning(schema),
     createIndexWarning(schema),
-
-    createQueueFunction(schema),
-    deleteQueueFunction(schema),
 
     insertVersion(schema, version)
   ]
@@ -211,36 +216,7 @@ function jobTableFormatFunction (schema: string) {
         table_name
       );
     $$
-    LANGUAGE sql IMMUTABLE;
-  `
-}
-
-function jobTableRunFunction (schema: string) {
-  return `
-    CREATE FUNCTION ${schema}.job_table_run(command text, tbl_name text DEFAULT NULL, queue_name text DEFAULT NULL)
-    RETURNS VOID AS
-    $$
-    DECLARE
-      tbl RECORD;
-    BEGIN
-      IF queue_name IS NOT NULL THEN
-        SELECT table_name INTO tbl_name FROM ${schema}.queue WHERE name = queue_name;
-      END IF;
-
-      IF tbl_name IS NOT NULL THEN
-        EXECUTE ${schema}.job_table_format(command, tbl_name);
-        RETURN;
-      END IF;
-
-      EXECUTE ${schema}.job_table_format(command, '${COMMON_JOB_TABLE}');
-
-      FOR tbl IN SELECT table_name FROM ${schema}.queue WHERE partition = true
-      LOOP
-        EXECUTE ${schema}.job_table_format(command, tbl.table_name);
-      END LOOP;
-    END;
-    $$
-    LANGUAGE plpgsql;
+    LANGUAGE sql;
   `
 }
 
@@ -249,45 +225,10 @@ function jobTableRunAsyncFunction (schema: string) {
     CREATE FUNCTION ${schema}.job_table_run_async(command_name text, version int, command text, tbl_name text DEFAULT NULL, queue_name text DEFAULT NULL)
     RETURNS VOID AS
     $$
-    BEGIN
-      IF queue_name IS NOT NULL THEN
-        SELECT table_name INTO tbl_name FROM ${schema}.queue WHERE name = queue_name;
-      END IF;
-
-      IF tbl_name IS NOT NULL THEN
-        INSERT INTO ${schema}.bam (name, version, status, queue, table_name, command)
-        VALUES (
-          command_name,
-          version,
-          'pending',
-          queue_name,
-          tbl_name,
-          ${schema}.job_table_format(command, tbl_name)
-        );
-        RETURN;
-      END IF;
-
       INSERT INTO ${schema}.bam (name, version, status, queue, table_name, command)
-      SELECT
-        command_name,
-        version,
-        'pending',
-        NULL,
-        '${COMMON_JOB_TABLE}',
-        ${schema}.job_table_format(command, '${COMMON_JOB_TABLE}')
-      UNION ALL
-      SELECT
-        command_name,
-        version,
-        'pending',
-        queue.name,
-        queue.table_name,
-        ${schema}.job_table_format(command, queue.table_name)
-      FROM ${schema}.queue
-      WHERE partition = true;
-    END;
+      VALUES (command_name, version, 'pending', NULL, '${COMMON_JOB_TABLE}', command)
     $$
-    LANGUAGE plpgsql;
+    LANGUAGE sql;
   `
 }
 
@@ -319,8 +260,9 @@ function createTableJob (schema: string) {
       dead_letter text,
       policy text,
       heartbeat_on timestamp with time zone,
-      heartbeat_seconds int
-    ) PARTITION BY LIST (name)
+      heartbeat_seconds int,
+      PRIMARY KEY (name, id)
+    )
   `
 }
 
@@ -347,140 +289,6 @@ const JOB_COLUMNS_ALL = `${JOB_COLUMNS_MIN},
   output
 `
 
-function createTableJobCommon (schema: string) {
-  return `
-    CREATE TABLE ${schema}.${COMMON_JOB_TABLE} (LIKE ${schema}.job INCLUDING GENERATED INCLUDING DEFAULTS);
-
-    SELECT ${schema}.job_table_run($cmd$${createPrimaryKeyJob(schema)}$cmd$, '${COMMON_JOB_TABLE}');
-    SELECT ${schema}.job_table_run($cmd$${createQueueForeignKeyJob(schema)}$cmd$, '${COMMON_JOB_TABLE}');
-    SELECT ${schema}.job_table_run($cmd$${createQueueForeignKeyJobDeadLetter(schema)}$cmd$, '${COMMON_JOB_TABLE}');
-    SELECT ${schema}.job_table_run($cmd$${createIndexJobPolicyShort(schema)}$cmd$, '${COMMON_JOB_TABLE}');
-    SELECT ${schema}.job_table_run($cmd$${createIndexJobPolicySingleton(schema)}$cmd$, '${COMMON_JOB_TABLE}');
-    SELECT ${schema}.job_table_run($cmd$${createIndexJobPolicyStately(schema)}$cmd$, '${COMMON_JOB_TABLE}');
-    SELECT ${schema}.job_table_run($cmd$${createIndexJobPolicyExclusive(schema)}$cmd$, '${COMMON_JOB_TABLE}');
-    SELECT ${schema}.job_table_run($cmd$${createIndexJobPolicyKeyStrictFifo(schema)}$cmd$, '${COMMON_JOB_TABLE}');
-    SELECT ${schema}.job_table_run($cmd$${createCheckConstraintKeyStrictFifo(schema)}$cmd$, '${COMMON_JOB_TABLE}');
-    SELECT ${schema}.job_table_run($cmd$${createIndexJobThrottle(schema)}$cmd$, '${COMMON_JOB_TABLE}');
-    SELECT ${schema}.job_table_run($cmd$${createIndexJobFetch(schema)}$cmd$, '${COMMON_JOB_TABLE}');
-    SELECT ${schema}.job_table_run($cmd$${createIndexJobGroupConcurrency(schema)}$cmd$, '${COMMON_JOB_TABLE}');
-
-    ALTER TABLE ${schema}.job ATTACH PARTITION ${schema}.${COMMON_JOB_TABLE} DEFAULT;
-  `
-}
-
-function createQueueFunction (schema: string) {
-  return `
-    CREATE FUNCTION ${schema}.create_queue(queue_name text, options jsonb)
-    RETURNS VOID AS
-    $$
-    DECLARE
-      tablename varchar := CASE WHEN options->>'partition' = 'true'
-                            THEN 'j' || encode(sha224(queue_name::bytea), 'hex')
-                            ELSE '${COMMON_JOB_TABLE}'
-                            END;
-      queue_created_on timestamptz;
-    BEGIN
-
-      WITH q as (
-        INSERT INTO ${schema}.queue (
-          name,
-          policy,
-          retry_limit,
-          retry_delay,
-          retry_backoff,
-          retry_delay_max,
-          expire_seconds,
-          retention_seconds,
-          deletion_seconds,
-          warning_queued,
-          dead_letter,
-          partition,
-          table_name,
-          heartbeat_seconds
-        )
-        VALUES (
-          queue_name,
-          options->>'policy',
-          COALESCE((options->>'retryLimit')::int, ${QUEUE_DEFAULTS.retry_limit}),
-          COALESCE((options->>'retryDelay')::int, ${QUEUE_DEFAULTS.retry_delay}),
-          COALESCE((options->>'retryBackoff')::bool, ${QUEUE_DEFAULTS.retry_backoff}),
-          (options->>'retryDelayMax')::int,
-          COALESCE((options->>'expireInSeconds')::int, ${QUEUE_DEFAULTS.expire_seconds}),
-          COALESCE((options->>'retentionSeconds')::int, ${QUEUE_DEFAULTS.retention_seconds}),
-          COALESCE((options->>'deleteAfterSeconds')::int, ${QUEUE_DEFAULTS.deletion_seconds}),
-          COALESCE((options->>'warningQueueSize')::int, ${QUEUE_DEFAULTS.warning_queued}),
-          options->>'deadLetter',
-          COALESCE((options->>'partition')::bool, ${QUEUE_DEFAULTS.partition}),
-          tablename,
-          (options->>'heartbeatSeconds')::int
-        )
-        ON CONFLICT DO NOTHING
-        RETURNING created_on
-      )
-      SELECT created_on into queue_created_on from q;
-
-      IF queue_created_on IS NULL OR options->>'partition' IS DISTINCT FROM 'true' THEN
-        RETURN;
-      END IF;
-
-      EXECUTE format('CREATE TABLE ${schema}.%I (LIKE ${schema}.job INCLUDING DEFAULTS)', tablename);
-
-      EXECUTE ${schema}.job_table_format($cmd$${createPrimaryKeyJob(schema)}$cmd$, tablename);
-      EXECUTE ${schema}.job_table_format($cmd$${createQueueForeignKeyJob(schema)}$cmd$, tablename);
-      EXECUTE ${schema}.job_table_format($cmd$${createQueueForeignKeyJobDeadLetter(schema)}$cmd$, tablename);
-
-      EXECUTE ${schema}.job_table_format($cmd$${createIndexJobFetch(schema)}$cmd$, tablename);
-      EXECUTE ${schema}.job_table_format($cmd$${createIndexJobThrottle(schema)}$cmd$, tablename);
-      EXECUTE ${schema}.job_table_format($cmd$${createIndexJobGroupConcurrency(schema)}$cmd$, tablename);
-
-      IF options->>'policy' = 'short' THEN
-        EXECUTE ${schema}.job_table_format($cmd$${createIndexJobPolicyShort(schema)}$cmd$, tablename);
-      ELSIF options->>'policy' = 'singleton' THEN
-        EXECUTE ${schema}.job_table_format($cmd$${createIndexJobPolicySingleton(schema)}$cmd$, tablename);
-      ELSIF options->>'policy' = 'stately' THEN
-        EXECUTE ${schema}.job_table_format($cmd$${createIndexJobPolicyStately(schema)}$cmd$, tablename);
-      ELSIF options->>'policy' = 'exclusive' THEN
-        EXECUTE ${schema}.job_table_format($cmd$${createIndexJobPolicyExclusive(schema)}$cmd$, tablename);
-      ELSIF options->>'policy' = '${QUEUE_POLICIES.key_strict_fifo}' THEN
-        EXECUTE ${schema}.job_table_format($cmd$${createIndexJobPolicyKeyStrictFifo(schema)}$cmd$, tablename);
-        EXECUTE ${schema}.job_table_format($cmd$${createCheckConstraintKeyStrictFifo(schema)}$cmd$, tablename);
-      END IF;
-
-      EXECUTE format('ALTER TABLE ${schema}.%I ADD CONSTRAINT cjc CHECK (name=%L)', tablename, queue_name);
-      EXECUTE format('ALTER TABLE ${schema}.job ATTACH PARTITION ${schema}.%I FOR VALUES IN (%L)', tablename, queue_name);
-    END;
-    $$
-    LANGUAGE plpgsql;
-  `
-}
-
-function deleteQueueFunction (schema: string) {
-  return `
-    CREATE FUNCTION ${schema}.delete_queue(queue_name text)
-    RETURNS VOID AS
-    $$
-    DECLARE
-      v_table varchar;
-      v_partition bool;
-    BEGIN
-      SELECT table_name, partition
-      FROM ${schema}.queue
-      WHERE name = queue_name
-      INTO v_table, v_partition;
-
-      IF v_partition THEN
-        EXECUTE format('DROP TABLE IF EXISTS ${schema}.%I', v_table);
-      ELSE
-        EXECUTE format('DELETE FROM ${schema}.%I WHERE name = %L', v_table, queue_name);
-      END IF;
-
-      DELETE FROM ${schema}.queue WHERE name = queue_name;
-    END;
-    $$
-    LANGUAGE plpgsql;
-  `
-}
-
 function createQueue (schema: string, name: string, options: unknown) {
   const sql = `SELECT ${schema}.create_queue('${name}', '${JSON.stringify(options)}'::jsonb)`
   return locked(schema, sql, 'create-queue')
@@ -496,11 +304,11 @@ function createPrimaryKeyJob (schema: string) {
 }
 
 function createQueueForeignKeyJob (schema: string) {
-  return `ALTER TABLE ${schema}.job ADD CONSTRAINT q_fkey FOREIGN KEY (name) REFERENCES ${schema}.queue (name) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED`
+  return `ALTER TABLE ${schema}.job ADD CONSTRAINT q_fkey FOREIGN KEY (name) REFERENCES ${schema}.queue (name) ON DELETE RESTRICT`
 }
 
 function createQueueForeignKeyJobDeadLetter (schema: string) {
-  return `ALTER TABLE ${schema}.job ADD CONSTRAINT dlq_fkey FOREIGN KEY (dead_letter) REFERENCES ${schema}.queue (name) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED`
+  return `ALTER TABLE ${schema}.job ADD CONSTRAINT dlq_fkey FOREIGN KEY (dead_letter) REFERENCES ${schema}.queue (name) ON DELETE RESTRICT`
 }
 
 function createIndexJobPolicyShort (schema: string) {
@@ -1107,31 +915,30 @@ function insertJobs (schema: string, { table, name, returnId = true }: InsertJob
       COALESCE("deadLetter", q.dead_letter) as dead_letter,
       COALESCE("heartbeatSeconds", q.heartbeat_seconds) as heartbeat_seconds
     FROM (
-      SELECT *,
+      SELECT
+        (x->>'id')::uuid as id,
+        (x->>'priority')::integer as priority,
+        (x->>'data')::jsonb as data,
+        x->>'startAfter' as "startAfter",
+        (x->>'retryLimit')::integer as "retryLimit",
+        (x->>'retryDelay')::integer as "retryDelay",
+        (x->>'retryDelayMax')::integer as "retryDelayMax",
+        (x->>'retryBackoff')::boolean as "retryBackoff",
+        x->>'singletonKey' as "singletonKey",
+        (x->>'singletonSeconds')::integer as "singletonSeconds",
+        (x->>'singletonOffset')::integer as "singletonOffset",
+        x->>'groupId' as "groupId",
+        x->>'groupTier' as "groupTier",
+        (x->>'expireInSeconds')::integer as "expireInSeconds",
+        (x->>'deleteAfterSeconds')::integer as "deleteAfterSeconds",
+        (x->>'retentionSeconds')::integer as "retentionSeconds",
+        x->>'deadLetter' as "deadLetter",
+        (x->>'heartbeatSeconds')::integer as "heartbeatSeconds",
         CASE
-          WHEN right("startAfter", 1) = 'Z' THEN CAST("startAfter" as timestamp with time zone)
-          ELSE now() + CAST(COALESCE("startAfter",'0') as interval)
+          WHEN right(x->>'startAfter', 1) = 'Z' THEN CAST(x->>'startAfter' as timestamp with time zone)
+          ELSE now() + CAST(COALESCE(x->>'startAfter','0') as interval)
           END as start_after
-      FROM json_to_recordset($1::json) as x (
-        id uuid,
-        priority integer,
-        data jsonb,
-        "startAfter" text,
-        "retryLimit" integer,
-        "retryDelay" integer,
-        "retryDelayMax" integer,
-        "retryBackoff" boolean,
-        "singletonKey" text,
-        "singletonSeconds" integer,
-        "singletonOffset" integer,
-        "groupId" text,
-        "groupTier" text,
-        "expireInSeconds" integer,
-        "deleteAfterSeconds" integer,
-        "retentionSeconds" integer,
-        "deadLetter" text,
-        "heartbeatSeconds" integer
-      )
+      FROM jsonb_array_elements($1::jsonb) AS x
     ) j
     JOIN ${schema}.queue q ON q.name = '${name}'
     ON CONFLICT DO NOTHING
@@ -1433,18 +1240,9 @@ function locked (schema: string, query: string | string[], key?: string): string
 
   return `
     BEGIN;
-    SET LOCAL lock_timeout = 30000;
-    SET LOCAL idle_in_transaction_session_timeout = 30000;
-    ${advisoryLock(schema, key)};
     ${sql};
     COMMIT;
   `
-}
-
-function advisoryLock (schema: string, key?: string) {
-  return `SELECT pg_advisory_xact_lock(
-      ('x' || encode(sha224((current_database() || '.pgboss.${schema}${key || ''}')::bytea), 'hex'))::bit(64)::bigint
-  )`
 }
 
 function assertMigration (schema: string, version: number) {
