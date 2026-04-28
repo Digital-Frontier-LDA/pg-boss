@@ -40,6 +40,7 @@
   "scripts": {
     "build": "npm run clean && tsc --project tsconfig.build.json",
     "clean": "node -e \"fs.rmSync('dist',{recursive:true,force:true})\"",
+    "prepare": "npm run build",
     "prepublishOnly": "npm install && npm test && npm run build",
     "pretest": "prisma generate --schema=test/prisma/schema.prisma",
     "test": "eslint . && vitest run",
