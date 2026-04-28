@@ -328,7 +328,7 @@ function createIndexJobThrottle (schema: string) {
 }
 
 function createIndexJobFetch (schema: string) {
-  return `CREATE INDEX job_i5 ON ${schema}.job (name, start_after) INCLUDE (priority, created_on, id) WHERE state < '${JOB_STATES.active}'`
+  return `CREATE INDEX job_i5 ON ${schema}.job (name, start_after) INCLUDE (priority, created_on) WHERE state < '${JOB_STATES.active}'`
 }
 
 function createIndexJobPolicyExclusive (schema: string) {

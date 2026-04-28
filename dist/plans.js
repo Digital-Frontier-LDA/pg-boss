@@ -286,7 +286,7 @@ function createIndexJobThrottle(schema) {
     return `CREATE UNIQUE INDEX job_i4 ON ${schema}.job (name, singleton_on, COALESCE(singleton_key, '')) WHERE state <> '${JOB_STATES.cancelled}' AND singleton_on IS NOT NULL`;
 }
 function createIndexJobFetch(schema) {
-    return `CREATE INDEX job_i5 ON ${schema}.job (name, start_after) INCLUDE (priority, created_on, id) WHERE state < '${JOB_STATES.active}'`;
+    return `CREATE INDEX job_i5 ON ${schema}.job (name, start_after) INCLUDE (priority, created_on) WHERE state < '${JOB_STATES.active}'`;
 }
 function createIndexJobPolicyExclusive(schema) {
     return `CREATE UNIQUE INDEX job_i6 ON ${schema}.job (name, COALESCE(singleton_key, '')) WHERE state <= '${JOB_STATES.active}' AND policy = '${QUEUE_POLICIES.exclusive}'`;
