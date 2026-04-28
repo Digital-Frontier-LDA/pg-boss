@@ -57,6 +57,8 @@ function create(schema, version, options) {
         createIndexJobGroupConcurrency(schema),
         createTableWarning(schema),
         createIndexWarning(schema),
+        createQueueFunction(schema),
+        deleteQueueFunction(schema),
         insertVersion(schema, version)
     ];
     return locked(schema, commands);
@@ -256,6 +258,48 @@ const JOB_COLUMNS_ALL = `${JOB_COLUMNS_MIN},
   dead_letter as "deadLetter",
   output
 `;
+function createQueueFunction(schema) {
+    return `
+    CREATE OR REPLACE FUNCTION ${schema}.create_queue(queue_name text, options jsonb)
+    RETURNS VOID AS
+    $$
+      INSERT INTO ${schema}.queue (
+        name, policy, retry_limit, retry_delay, retry_backoff, retry_delay_max,
+        expire_seconds, retention_seconds, deletion_seconds, warning_queued,
+        dead_letter, partition, table_name, heartbeat_seconds
+      )
+      VALUES (
+        $1,
+        $2->>'policy',
+        COALESCE(($2->>'retryLimit')::int, 2),
+        COALESCE(($2->>'retryDelay')::int, 0),
+        COALESCE(($2->>'retryBackoff')::bool, false),
+        ($2->>'retryDelayMax')::int,
+        COALESCE(($2->>'expireInSeconds')::int, 900),
+        COALESCE(($2->>'retentionSeconds')::int, 1209600),
+        COALESCE(($2->>'deleteAfterSeconds')::int, 604800),
+        COALESCE(($2->>'warningQueueSize')::int, 0),
+        $2->>'deadLetter',
+        false,
+        'job',
+        ($2->>'heartbeatSeconds')::int
+      )
+      ON CONFLICT DO NOTHING
+    $$
+    LANGUAGE sql;
+  `;
+}
+function deleteQueueFunction(schema) {
+    return `
+    CREATE OR REPLACE FUNCTION ${schema}.delete_queue(queue_name text)
+    RETURNS VOID AS
+    $$
+      DELETE FROM ${schema}.job WHERE name = queue_name;
+      DELETE FROM ${schema}.queue WHERE name = queue_name;
+    $$
+    LANGUAGE sql;
+  `;
+}
 function createQueue(schema, name, options) {
     const sql = `SELECT ${schema}.create_queue('${name}', '${JSON.stringify(options)}'::jsonb)`;
     return locked(schema, sql, 'create-queue');
