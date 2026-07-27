@@ -42,7 +42,7 @@
   },
   "dependencies": {
     "@base-ui/react": "^1.4.1",
-    "@hono/node-server": "^1.19.12",
+    "@hono/node-server": "^2.0.10",
     "@react-router/node": "^8.3.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
