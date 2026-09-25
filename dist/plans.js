@@ -1040,6 +1040,7 @@ function failJobs(schema, table, where, output) {
       FROM results r
         JOIN ${schema}.queue q ON q.name = r.dead_letter
       WHERE state = '${JOB_STATES.failed}'
+      RETURNING id
     )
     SELECT COUNT(*) FROM results
   `;
