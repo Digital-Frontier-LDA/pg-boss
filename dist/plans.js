@@ -935,10 +935,10 @@ function failJobs(schema, table, where, output) {
         CASE WHEN retry_count = retry_limit THEN start_after
              WHEN NOT retry_backoff THEN now() + retry_delay * interval '1'
              ELSE now() + LEAST(
-               retry_delay_max,
-               retry_delay * (
-                2 ^ LEAST(16, retry_count + 1) / 2 +
-                2 ^ LEAST(16, retry_count + 1) / 2 * random()
+               retry_delay_max::float8,
+               retry_delay::float8 * (
+                (2 ^ LEAST(16, retry_count + 1) / 2)::float8 +
+                (2 ^ LEAST(16, retry_count + 1) / 2)::float8 * random()
                )
              ) * interval '1s'
         END as start_after,
